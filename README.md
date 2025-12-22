@@ -13,7 +13,6 @@ This tool helps you visualize this distortion. You can use it to:
 
 The tool runs directly in your browser.
 **[Launch Riemann Sketch](https://freiberg-roman.github.io/riemann-sketch/)**
-*(Note: Link will be active once deployed)*
 
 ## Features
 
