@@ -1,0 +1,5 @@
+body { margin: 0; overflow: hidden; background-color: #0f172a; color: #e2e8f0; }
+canvas { display: block; }
+.custom-scrollbar::-webkit-scrollbar { width: 4px; }
+.custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+.custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
