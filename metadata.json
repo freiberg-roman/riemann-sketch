@@ -1,0 +1,5 @@
+{
+  "name": "RiemannSketch 5VP",
+  "description": "A precision 5-point perspective drawing assistant based on Riemannian geometry stereographic projection. Features infinite vanishing lines, rotatable cubes..",
+  "requestFramePermissions": []
+}
