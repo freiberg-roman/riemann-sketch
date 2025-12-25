@@ -189,8 +189,8 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
       // --- Grid Rendering ---
       if (showGrid) {
         // Vertical Arcs (Longitude/Azimuth) - Green
-        for (let i = 90 % gridAngle; i <= 180; i += gridAngle) {
-          const theta = (i - 90) * (Math.PI / 180);
+        for (let i = 180 % gridAngle; i < 360; i += gridAngle) {
+          const theta = (i - 180) * (Math.PI / 180);
           const pts: ProjectedPoint[] = [];
           for (let alpha = 0; alpha <= 360; alpha += gridStep) {
             const a = alpha * (Math.PI / 180);
@@ -198,7 +198,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
             pts.push(projectPoint(p, cameraRotation, width, height, viewSettings));
           }
           const groups = filterJumps(pts, width * viewSettings.zoom);
-          const isAxis = Math.abs(i - 90) < 0.1;
+          const isAxis = Math.abs(i - 180) < 0.1;
           groups.forEach(g => drawPolyline(g, isAxis ? axisColorV : gridColorV, isAxis ? 2 : 1));
 
           // Labels for Green Arcs
@@ -208,13 +208,13 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
           const lp = projectPoint(labelPos, cameraRotation, width, height, viewSettings);
           // Only draw if within bounds and not too far zoomed out
           if (lp.visible) {
-            drawText(`${i - 90}°`, lp.x, lp.y, axisColorV, "center", isAxis ? "bold" : "normal");
+            drawText(`${i - 180}°`, lp.x, lp.y, axisColorV, "center", isAxis ? "bold" : "normal");
           }
         }
 
         // Horizontal Arcs (Latitude/Elevation) - Red
-        for (let i = 90 % gridAngle; i <= 180; i += gridAngle) {
-          const phi = (i - 90) * (Math.PI / 180);
+        for (let i = 180 % gridAngle; i < 360; i += gridAngle) {
+          const phi = (i - 180) * (Math.PI / 180);
           const pts: ProjectedPoint[] = [];
           for (let alpha = 0; alpha <= 360; alpha += gridStep) {
             const a = alpha * (Math.PI / 180);
@@ -222,7 +222,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
             pts.push(projectPoint(p, cameraRotation, width, height, viewSettings));
           }
           const groups = filterJumps(pts, width * viewSettings.zoom);
-          const isAxis = Math.abs(i - 90) < 0.1;
+          const isAxis = Math.abs(i - 180) < 0.1;
           groups.forEach(g => drawPolyline(g, isAxis ? axisColorH : gridColorH, isAxis ? 2 : 1));
 
           // Labels for Red Arcs
@@ -230,7 +230,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
           const labelPos = new Vector3(0, Math.cos(phi), Math.sin(phi));
           const lp = projectPoint(labelPos, cameraRotation, width, height, viewSettings);
           if (lp.visible) {
-            drawText(`${i - 90}°`, lp.x, lp.y, axisColorH, "center", isAxis ? "bold" : "normal");
+            drawText(`${i - 180}°`, lp.x, lp.y, axisColorH, "center", isAxis ? "bold" : "normal");
           }
         }
       }
