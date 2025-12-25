@@ -1,5 +1,6 @@
 import { Vector3, Euler, Quaternion } from 'three';
 import { ProjectedPoint, ViewSettings } from '../types';
+import { VIEWPORT_PADDING } from '../constants';
 
 /**
  * Projects a 3D point onto the 2D plane using Stereographic Projection.
@@ -15,7 +16,7 @@ export function projectPoint(
   const p = point.clone();
   const quaternion = new Quaternion();
   quaternion.setFromEuler(cameraRotation);
-  quaternion.invert(); 
+  quaternion.invert();
   p.applyQuaternion(quaternion);
 
   const r = p.length();
@@ -37,11 +38,11 @@ export function projectPoint(
   const v = nz / denom;
 
   // Mapping to screen coordinates with zoom and offset
-  const baseScale = Math.min(width, height) / 2;
+  const baseScale = Math.min(width, height) / 2 - VIEWPORT_PADDING;
   const effectiveScale = baseScale * (viewSettings?.zoom ?? 1);
-  
+
   const screenX = width / 2 + (u * effectiveScale) + (viewSettings?.offsetX ?? 0);
-  const screenY = height / 2 - (v * effectiveScale) + (viewSettings?.offsetY ?? 0); 
+  const screenY = height / 2 - (v * effectiveScale) + (viewSettings?.offsetY ?? 0);
 
   return {
     x: screenX,
@@ -90,22 +91,42 @@ export function getProjectedInfiniteLine(
   width: number,
   height: number,
   steps: number = 100,
-  viewSettings?: ViewSettings
+  viewSettings?: ViewSettings,
+  fullCircle: boolean = false
 ): ProjectedPoint[] {
   const points: ProjectedPoint[] = [];
   const vpBack = getVanishingPoint(direction.clone().negate(), cameraRotation, width, height, viewSettings);
   points.push(vpBack);
-  
+
   for (let i = 0; i <= steps; i++) {
     const alpha = (i / steps) * Math.PI - (Math.PI / 2);
-    const safeAlpha = Math.max(-1.5, Math.min(1.5, alpha)); 
-    const t = Math.tan(safeAlpha) * 200; 
+    const safeAlpha = Math.max(-1.5, Math.min(1.5, alpha));
+    const t = Math.tan(safeAlpha) * 200;
     const p = new Vector3().copy(origin).addScaledVector(direction, t);
     points.push(projectPoint(p, cameraRotation, width, height, viewSettings));
   }
 
   const vpFront = getVanishingPoint(direction, cameraRotation, width, height, viewSettings);
   points.push(vpFront);
-  
+
+  if (fullCircle) {
+    const antipodalPoints: ProjectedPoint[] = [];
+    const negOrigin = origin.clone().negate();
+    // Trace the antipodal arc (from vpBack to vpFront)
+    for (let i = 0; i <= steps; i++) {
+      const alpha = (i / steps) * Math.PI - (Math.PI / 2);
+      const safeAlpha = Math.max(-1.5, Math.min(1.5, alpha));
+      const t = Math.tan(safeAlpha) * 200;
+      const p = new Vector3().copy(negOrigin).addScaledVector(direction, t);
+      antipodalPoints.push(projectPoint(p, cameraRotation, width, height, viewSettings));
+    }
+    // We want to connect vpFront -> antipodal -> vpBack
+    // The antipodalPoints array goes from vpBack -> vpFront.
+    // So we reverse it to go vpFront -> vpBack.
+    points.push(...antipodalPoints.reverse());
+    // Finally close the loop back to start (vpBack)
+    points.push(vpBack);
+  }
+
   return points;
 }

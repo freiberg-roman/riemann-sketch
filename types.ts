@@ -36,6 +36,7 @@ export interface CubeGeometry extends BaseGeometry {
   rotation: Euler;
   showEdgeGuides: boolean;
   showCenterGuides: boolean;
+  showFullGuide?: boolean;
 }
 
 export type GeometryItem = CubeGeometry;

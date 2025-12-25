@@ -1,5 +1,5 @@
 export const CANVAS_SIZE = 2000; // Internal resolution
-export const VIEWPORT_PADDING = 50;
+export const VIEWPORT_PADDING = 30;
 
 // Colors
 export const COLOR_GRID_MAIN = 'rgba(71, 85, 105, 0.3)'; // Slate-600 low opacity

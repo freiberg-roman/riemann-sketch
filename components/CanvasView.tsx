@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useState } from 'react';
 import { AppState, CubeGeometry, ProjectedPoint } from '../types';
 import { Vector3, Euler, Quaternion } from 'three';
 import { projectPoint, getProjectedInfiniteLine, sampleProjectedLine } from '../utils/math';
-import { COLOR_STL } from '../constants';
+import { COLOR_STL, VIEWPORT_PADDING } from '../constants';
 
 interface CanvasViewProps {
   state: AppState;
@@ -138,7 +138,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
         ctx.fillRect(0, 0, width, height);
       }
 
-      const scale = (Math.min(width, height) / 2 - 30) * viewSettings.zoom;
+      const scale = (Math.min(width, height) / 2 - VIEWPORT_PADDING) * viewSettings.zoom;
       const centerX = width / 2 + viewSettings.offsetX;
       const centerY = height / 2 + viewSettings.offsetY;
 
@@ -260,17 +260,17 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
           // Trace infinite lines for all edges of the cube
           // For X-direction edges
           [0, 3, 4, 7].forEach(idx => {
-            const linePts = getProjectedInfiniteLine(cornersWorld[idx], axisX, cameraRotation, width, height, infiniteSteps, viewSettings);
+            const linePts = getProjectedInfiniteLine(cornersWorld[idx], axisX, cameraRotation, width, height, infiniteSteps, viewSettings, c.showFullGuide);
             filterJumps(linePts, width * viewSettings.zoom).forEach(g => drawPolyline(g, c.color, 0.4, [3, 6]));
           });
           // For Y-direction edges
           [0, 1, 2, 3].forEach(idx => {
-            const linePts = getProjectedInfiniteLine(cornersWorld[idx], axisY, cameraRotation, width, height, infiniteSteps, viewSettings);
+            const linePts = getProjectedInfiniteLine(cornersWorld[idx], axisY, cameraRotation, width, height, infiniteSteps, viewSettings, c.showFullGuide);
             filterJumps(linePts, width * viewSettings.zoom).forEach(g => drawPolyline(g, c.color, 0.4, [3, 6]));
           });
           // For Z-direction edges
           [0, 1, 4, 5].forEach(idx => {
-            const linePts = getProjectedInfiniteLine(cornersWorld[idx], axisZ, cameraRotation, width, height, infiniteSteps, viewSettings);
+            const linePts = getProjectedInfiniteLine(cornersWorld[idx], axisZ, cameraRotation, width, height, infiniteSteps, viewSettings, c.showFullGuide);
             filterJumps(linePts, width * viewSettings.zoom).forEach(g => drawPolyline(g, c.color, 0.4, [3, 6]));
           });
         }
