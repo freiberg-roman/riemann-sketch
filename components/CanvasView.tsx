@@ -144,6 +144,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
 
       const gridColorV = isDarkMode ? 'rgba(16, 185, 129, 0.2)' : 'rgba(5, 150, 105, 0.4)';
       const gridColorH = isDarkMode ? 'rgba(239, 68, 68, 0.2)' : 'rgba(220, 38, 38, 0.4)';
+      const gridColorC = isDarkMode ? 'rgba(59, 130, 246, 0.2)' : 'rgba(37, 99, 235, 0.4)';
       const axisColorV = isDarkMode ? '#10b981' : '#059669';
       const axisColorH = isDarkMode ? '#ef4444' : '#dc2626';
       const labelColor = isDarkMode ? '#3b82f6' : '#2563eb';
@@ -232,6 +233,19 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
           if (lp.visible) {
             drawText(`${i - 180}°`, lp.x, lp.y, axisColorH, "center", isAxis ? "bold" : "normal");
           }
+        }
+
+        // Horizontal Arcs (Latitude/Elevation) - Cyan
+        for (let i = 180 % gridAngle; i < 360; i += gridAngle) {
+          const phi = (i - 180) * (Math.PI / 180);
+          const pts: ProjectedPoint[] = [];
+          for (let alpha = 0; alpha <= 360; alpha += gridStep) {
+            const a = alpha * (Math.PI / 180);
+            const p = new Vector3(Math.cos(phi) * Math.cos(a), Math.sin(a), Math.sin(phi) * Math.cos(a));
+            pts.push(projectPoint(p, cameraRotation, width, height, viewSettings));
+          }
+          const groups = filterJumps(pts, width * viewSettings.zoom);
+          groups.forEach(g => drawPolyline(g, gridColorC, 1));
         }
       }
 
