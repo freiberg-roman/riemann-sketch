@@ -11,10 +11,8 @@ const App: React.FC = () => {
     showGrid: true,
     gridAngle: 15,
     snapToGrid: true,
-    renderDetail: 10,
+    renderDetail: 50,
     geometries: [],
-    stlGeometry: null,
-    stlScale: 1.0,
     viewSettings: {
       zoom: 1,
       offsetX: 0,

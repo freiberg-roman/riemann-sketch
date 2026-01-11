@@ -235,7 +235,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
           }
         }
 
-        // Horizontal Arcs (Latitude/Elevation) - Cyan
+        // Central Arcs - Blue
         for (let i = 180 % gridAngle; i < 360; i += gridAngle) {
           const phi = (i - 180) * (Math.PI / 180);
           const pts: ProjectedPoint[] = [];
@@ -300,7 +300,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
 
       // --- Static Outer Rim Degree Indicators ---
       if (showGrid) {
-        for (let i = 0; i < 360; i += gridAngle) {
+        for (let i = 90 % gridAngle; i < 360; i += gridAngle) {
           const angleRad = (i - 90) * (Math.PI / 180);
           const tr = scale + 20;
           const lx = centerX + tr * Math.cos(angleRad);

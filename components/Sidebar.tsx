@@ -172,8 +172,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ state, setState }) => {
             <span className="font-mono text-xs">{state.gridAngle}°</span>
           </div>
           <input
-            type="range" min="5" max="45" step="5" value={state.gridAngle}
-            onChange={(e) => setState(prev => ({ ...prev, gridAngle: parseFloat(e.target.value) }))}
+            type="range" min="0" max="10" step="1"
+            value={[5, 6, 9, 10, 12, 15, 18, 20, 30, 36, 45].indexOf(state.gridAngle) >= 0 ? [5, 6, 9, 10, 12, 15, 18, 20, 30, 36, 45].indexOf(state.gridAngle) : 0}
+            onChange={(e) => {
+              const values = [5, 6, 9, 10, 12, 15, 18, 20, 30, 36, 45];
+              setState(prev => ({ ...prev, gridAngle: values[parseInt(e.target.value)] }));
+            }}
             className="w-full h-1 bg-slate-300 rounded-lg appearance-none cursor-pointer accent-cyan-500"
           />
         </div>
