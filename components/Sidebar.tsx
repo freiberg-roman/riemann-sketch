@@ -1,10 +1,11 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState } from 'react';
 import { AppState, GeometryType, CubeGeometry } from '../types';
 import { Vector3, Euler } from 'three';
 import {
   Plus, Box, Rotate3D, Eye, Trash2, Maximize, Activity, ChevronDown, ChevronRight,
-  Crop, RefreshCw, Moon, Sun, Image, Move,
+  Crop, RefreshCw, Moon, Sun, Image, Move, Settings
 } from 'lucide-react';
+import { SettingsPanel } from './SettingsPanel';
 
 interface SidebarProps {
   state: AppState;
@@ -13,6 +14,7 @@ interface SidebarProps {
 
 export const Sidebar: React.FC<SidebarProps> = ({ state, setState }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
   const updateCamRotation = (axis: 'x' | 'y' | 'z', value: number) => {
     const newRot = state.cameraRotation.clone();
@@ -103,8 +105,19 @@ export const Sidebar: React.FC<SidebarProps> = ({ state, setState }) => {
           >
             {state.isDarkMode ? <Sun size={16} /> : <Moon size={16} />}
           </button>
+          <button
+            onClick={() => setIsSettingsOpen(true)}
+            className={`p-2 rounded transition-colors ${buttonClass}`}
+            title="Settings"
+          >
+            <Settings size={16} />
+          </button>
         </div>
       </div>
+
+      {isSettingsOpen && (
+        <SettingsPanel state={state} setState={setState} onClose={() => setIsSettingsOpen(false)} />
+      )}
 
       {/* Advanced Tools */}
       <div className={`flex flex-col gap-2 p-1 rounded-lg border ${state.isDarkMode ? 'bg-slate-800/80 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
@@ -154,49 +167,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ state, setState }) => {
       </div>
 
       {/* Grid Settings */}
-      <div className={`space-y-4 p-4 rounded-lg border ${state.isDarkMode ? 'bg-slate-800/50 border-slate-700/50' : 'bg-slate-100 border-slate-200'}`}>
-        <div className={`flex items-center justify-between border-b pb-2 ${state.isDarkMode ? 'border-slate-700' : 'border-slate-200'}`}>
-          <div className={`flex items-center gap-2 font-semibold ${state.isDarkMode ? 'text-slate-200' : 'text-slate-700'}`}>
-            <Rotate3D size={16} className="text-cyan-500" /> Grid Settings
-          </div>
-          <button
-            onClick={() => setState(p => ({ ...p, showGrid: !p.showGrid }))}
-            className={`w-10 h-6 rounded-full transition-colors relative ${state.showGrid ? 'bg-cyan-600' : 'bg-slate-400'}`}
-          >
-            <div className={`absolute top-1 left-1 bg-white w-4 h-4 rounded-full transition-transform ${state.showGrid ? 'translate-x-4' : ''}`} />
-          </button>
-        </div>
-        <div>
-          <div className="flex justify-between mb-1">
-            <span className="text-xs">Interval (Deg)</span>
-            <span className="font-mono text-xs">{state.gridAngle}°</span>
-          </div>
-          <input
-            type="range" min="0" max="10" step="1"
-            value={[5, 6, 9, 10, 12, 15, 18, 20, 30, 36, 45].indexOf(state.gridAngle) >= 0 ? [5, 6, 9, 10, 12, 15, 18, 20, 30, 36, 45].indexOf(state.gridAngle) : 0}
-            onChange={(e) => {
-              const values = [5, 6, 9, 10, 12, 15, 18, 20, 30, 36, 45];
-              setState(prev => ({ ...prev, gridAngle: values[parseInt(e.target.value)] }));
-            }}
-            className="w-full h-1 bg-slate-300 rounded-lg appearance-none cursor-pointer accent-cyan-500"
-          />
-        </div>
-        <div className={`pt-2 border-t ${state.isDarkMode ? 'border-slate-700/50' : 'border-slate-200'}`}>
-          <div className="flex justify-between items-center mb-1">
-            <span className="flex items-center gap-1 text-xs"><Activity size={10} /> Base Precision</span>
-            <input
-              type="number" min="1" max="1000" value={state.renderDetail}
-              onChange={(e) => setState(prev => ({ ...prev, renderDetail: parseInt(e.target.value) || 1 }))}
-              className={inputClass}
-            />
-          </div>
-          <input
-            type="range" min="1" max="100" step="1" value={state.renderDetail > 100 ? 100 : state.renderDetail}
-            onChange={(e) => setState(prev => ({ ...prev, renderDetail: parseFloat(e.target.value) }))}
-            className="w-full h-1 bg-slate-300 rounded-lg appearance-none cursor-pointer accent-pink-500"
-          />
-        </div>
-      </div>
+
 
       {/* Geometry List */}
       <div className="space-y-4 flex-1 overflow-hidden flex flex-col">
