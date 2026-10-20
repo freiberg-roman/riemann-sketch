@@ -30,3 +30,14 @@ If you want to run this project locally:
 1.  Clone the repo.
 2.  Run `npm install`.
 3.  Run `npm run dev` to start the local server.
+
+## WASM acceleration
+
+Curve tessellation (grid, cube edges, perspective guides) runs in a Rust/WASM module (`wasm/`) using
+adaptive, screen-space subdivision with off-screen culling. The compiled `utils/riemann_core.wasm` is
+committed, so no Rust toolchain is required to build the app. To rebuild it after changing `wasm/src/lib.rs`:
+
+```sh
+rustup target add wasm32-unknown-unknown
+./wasm/build.sh
+```

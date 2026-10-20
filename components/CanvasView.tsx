@@ -1,8 +1,9 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { AppState, CubeGeometry, ProjectedPoint } from '../types';
-import { Vector3, Euler, Quaternion } from 'three';
-import { projectPoint, getProjectedInfiniteLine, sampleProjectedLine } from '../utils/math';
-import { COLOR_STL, VIEWPORT_PADDING } from '../constants';
+import { Vector3, Quaternion, Matrix4 } from 'three';
+import { projectPoint } from '../utils/math';
+import { VIEWPORT_PADDING, DEG2RAD } from '../constants';
+import { WasmCore, wasmReady, getWasm, readOut } from '../utils/wasmCore';
 
 interface CanvasViewProps {
   state: AppState;
@@ -49,16 +50,9 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
       const dy = e.clientY - lastMousePos.current.y;
       lastMousePos.current = { x: e.clientX, y: e.clientY };
 
-      const sensitivity = 0.005;
-
-      setState(prev => {
-        const newRot = prev.cameraRotation.clone();
-        // Horizontal drag maps to Z rotation (Yaw/Roll)
-        // Vertical drag maps to X rotation (Pitch)
-        newRot.z -= dx * sensitivity;
-        newRot.x -= dy * sensitivity;
-        return { ...prev, cameraRotation: newRot };
-      });
+      const pr = pendingRot.current;
+      pr.dx += dx; pr.dy += dy;
+      if (!pr.raf) pr.raf = requestAnimationFrame(flushRotation);
     }
   };
 
@@ -75,11 +69,11 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
       const canvas = canvasRef.current;
       if (!canvas) return;
 
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
+      const centerX = canvas.clientWidth / 2;
+      const centerY = canvas.clientHeight / 2;
       const selCenterX = x1 + w / 2;
       const selCenterY = y1 + h / 2;
-      const zoomMultiplier = Math.min(canvas.width / w, canvas.height / h);
+      const zoomMultiplier = Math.min(canvas.clientWidth / w, canvas.clientHeight / h);
 
       setState(prev => {
         const newZoom = prev.viewSettings.zoom * zoomMultiplier;
@@ -107,29 +101,60 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
     setIsSelecting(false);
   };
 
+  // Coalesce rotation drags to at most one state update per frame
+  const pendingRot = useRef({ dx: 0, dy: 0, raf: 0 });
+  const flushRotation = () => {
+    const pr = pendingRot.current;
+    pr.raf = 0;
+    const { dx, dy } = pr;
+    pr.dx = 0; pr.dy = 0;
+    if (dx === 0 && dy === 0) return;
+    const sensitivity = 0.005;
+    setState(prev => {
+      const newRot = prev.cameraRotation.clone();
+      newRot.z -= dx * sensitivity;
+      newRot.x -= dy * sensitivity;
+      return { ...prev, cameraRotation: newRot };
+    });
+  };
+
+  const [wasm, setWasm] = useState<WasmCore | null>(getWasm());
+  useEffect(() => { if (!wasm) wasmReady.then(setWasm); }, []);
+
+  // Track container size (CSS px) without polling every frame
+  const [size, setSize] = useState({ w: 0, h: 0, dpr: 1 });
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const update = () => setSize({ w: container.clientWidth, h: container.clientHeight, dpr: Math.min(2, window.devicePixelRatio || 1) });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(container);
+    window.addEventListener('resize', update);
+    return () => { ro.disconnect(); window.removeEventListener('resize', update); };
+  }, []);
+
+  const renderRef = useRef<(isExporting: boolean) => void>(() => { });
+
   useEffect(() => {
     const canvas = canvasRef.current;
-    const container = containerRef.current;
-    if (!canvas || !container) return;
-
-    let animationFrameId: number;
+    if (!canvas) return;
 
     const render = (isExporting = false) => {
-      if (!isExporting && (canvas.width !== container.clientWidth || canvas.height !== container.clientHeight)) {
-        canvas.width = container.clientWidth;
-        canvas.height = container.clientHeight;
-      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx || !wasm || size.w === 0 || size.h === 0) return;
 
-      const ctx = canvas.getContext('2d', { alpha: true });
-      if (!ctx) return;
+      const width = size.w, height = size.h, dpr = size.dpr;
+      const pw = Math.round(width * dpr), ph = Math.round(height * dpr);
+      if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      const { width, height } = canvas;
       const { cameraRotation, showGrid, gridAngle, geometries, renderDetail, viewSettings, isDarkMode } = state;
 
       const adaptiveFactor = Math.min(10, Math.sqrt(viewSettings.zoom));
       const gridStep = 4 / (renderDetail * adaptiveFactor);
-      const edgeSteps = Math.round(10 * renderDetail * adaptiveFactor);
-      const infiniteSteps = Math.round(50 * renderDetail * adaptiveFactor);
+      const edgeSteps = Math.max(1, Math.round(10 * renderDetail * adaptiveFactor));
+      const infiniteSteps = Math.max(1, Math.round(50 * renderDetail * adaptiveFactor));
 
       if (isExporting) {
         ctx.clearRect(0, 0, width, height);
@@ -142,6 +167,44 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
       const centerX = width / 2 + viewSettings.offsetX;
       const centerY = height / 2 + viewSettings.offsetY;
 
+      // Inverse camera rotation as a 3x3 row-major matrix
+      const e = new Matrix4().makeRotationFromEuler(cameraRotation).elements; // column-major R
+      // R^T rows = R columns
+      const margin = 4;
+      wasm.set_view(
+        e[0], e[1], e[2], e[4], e[5], e[6], e[8], e[9], e[10],
+        scale, centerX, centerY, (width * viewSettings.zoom) / 3, 0.25 / dpr,
+        Math.max(0, centerX - scale) - margin, Math.max(0, centerY - scale) - margin,
+        Math.min(width, centerX + scale) + margin, Math.min(height, centerY + scale) + margin
+      );
+      const project = (x: number, y: number, z: number) =>
+        projectPoint(new Vector3(x, y, z), cameraRotation, width, height, viewSettings);
+
+      const TWO_PI = Math.PI * 2;
+      const greatCircle = (a: number[], b: number[], minDt: number, t0 = 0, t1 = TWO_PI, base = 64) =>
+        wasm.curve(0, a[0], a[1], a[2], b[0], b[1], b[2], t0, t1, base, minDt);
+      const segment = (s: Vector3, en: Vector3, steps: number) =>
+        wasm.curve(1, s.x, s.y, s.z, en.x - s.x, en.y - s.y, en.z - s.z, 0, 1, Math.min(16, steps), 1 / steps);
+
+      // Stroke everything currently in the wasm buffer as a single path
+      const strokeOut = (color: string, lw: number, dash: number[] = []) => {
+        const buf = readOut(wasm);
+        if (buf.length < 4) { wasm.reset(); return; }
+        ctx.beginPath();
+        let pen = false;
+        for (let i = 0; i < buf.length; i += 2) {
+          const x = buf[i];
+          if (x !== x) { pen = false; continue; }
+          if (pen) ctx.lineTo(x, buf[i + 1]); else { ctx.moveTo(x, buf[i + 1]); pen = true; }
+        }
+        ctx.strokeStyle = color;
+        ctx.lineWidth = lw;
+        ctx.setLineDash(dash);
+        ctx.stroke();
+        if (dash.length) ctx.setLineDash([]);
+        wasm.reset();
+      };
+
       const gridColorV = isDarkMode ? 'rgba(16, 185, 129, 0.2)' : 'rgba(5, 150, 105, 0.4)';
       const gridColorH = isDarkMode ? 'rgba(239, 68, 68, 0.2)' : 'rgba(220, 38, 38, 0.4)';
       const gridColorC = isDarkMode ? 'rgba(59, 130, 246, 0.2)' : 'rgba(37, 99, 235, 0.4)';
@@ -151,6 +214,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
       const boundaryColor = isDarkMode ? '#334155' : '#cbd5e1';
 
       ctx.save();
+      ctx.lineJoin = 'round';
 
       // Outer Boundary
       ctx.beginPath();
@@ -164,148 +228,105 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
       ctx.arc(centerX, centerY, scale, 0, Math.PI * 2);
       ctx.clip();
 
-      const drawPolyline = (points: ProjectedPoint[], color: string, width: number = 1, dash: number[] = []) => {
-        if (points.length < 2) return;
-        ctx.beginPath();
-        let first = true;
-        for (const p of points) {
-          if (!p.visible) { first = true; continue; }
-          if (first) { ctx.moveTo(p.x, p.y); first = false; }
-          else ctx.lineTo(p.x, p.y);
-        }
-        ctx.strokeStyle = color;
-        ctx.lineWidth = width;
-        ctx.setLineDash(dash);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      };
+      const fontSize = Math.max(8, 10 * Math.sqrt(viewSettings.zoom));
+      const fontNormal = `normal ${fontSize}px monospace`;
+      const fontBold = `bold ${fontSize}px monospace`;
+      ctx.textAlign = 'center';
+      const labels: { t: string; x: number; y: number; c: string; b: boolean }[] = [];
 
-      const drawText = (text: string, x: number, y: number, color: string, align: CanvasTextAlign = "center", weight: string = "normal") => {
-        ctx.fillStyle = color;
-        ctx.font = `${weight} ${Math.max(8, 10 * Math.sqrt(viewSettings.zoom))}px monospace`;
-        ctx.textAlign = align;
-        ctx.fillText(text, x, y);
-      };
-
-      // --- Grid Rendering ---
+      // --- Grid Rendering (batched per color) ---
       if (showGrid) {
-        // Vertical Arcs (Longitude/Azimuth) - Green
-        for (let i = 180 % gridAngle; i < 360; i += gridAngle) {
-          const theta = (i - 180) * (Math.PI / 180);
-          const pts: ProjectedPoint[] = [];
-          for (let alpha = 0; alpha <= 360; alpha += gridStep) {
-            const a = alpha * (Math.PI / 180);
-            const p = new Vector3(-Math.sin(theta) * Math.cos(a), Math.cos(theta) * Math.cos(a), Math.sin(a));
-            pts.push(projectPoint(p, cameraRotation, width, height, viewSettings));
-          }
-          const groups = filterJumps(pts, width * viewSettings.zoom);
-          const isAxis = Math.abs(i - 180) < 0.1;
-          groups.forEach(g => drawPolyline(g, isAxis ? axisColorV : gridColorV, isAxis ? 2 : 1));
+        const gridDt = Math.max(1e-7, gridStep * DEG2RAD);
+        const angles: number[] = [];
+        for (let i = 180 % gridAngle; i < 360; i += gridAngle) angles.push(i);
+        const isAxis = (i: number) => Math.abs(i - 180) < 0.1;
 
-          // Labels for Green Arcs
-          // Always show labels for the specified subdivision
-          // Sample at alpha=0 (Equator relative to grid construction)
-          const labelPos = new Vector3(-Math.sin(theta), Math.cos(theta), 0);
-          const lp = projectPoint(labelPos, cameraRotation, width, height, viewSettings);
-          // Only draw if within bounds and not too far zoomed out
-          if (lp.visible) {
-            drawText(`${i - 180}°`, lp.x, lp.y, axisColorV, "center", isAxis ? "bold" : "normal");
-          }
+        // Vertical Arcs (Longitude) - Green
+        for (const i of angles) if (!isAxis(i)) {
+          const th = (i - 180) * DEG2RAD;
+          greatCircle([-Math.sin(th), Math.cos(th), 0], [0, 0, 1], gridDt);
         }
+        strokeOut(gridColorV, 1);
+        for (const i of angles) if (isAxis(i)) greatCircle([0, 1, 0], [0, 0, 1], gridDt);
+        strokeOut(axisColorV, 2);
 
-        // Horizontal Arcs (Latitude/Elevation) - Red
-        for (let i = 180 % gridAngle; i < 360; i += gridAngle) {
-          const phi = (i - 180) * (Math.PI / 180);
-          const pts: ProjectedPoint[] = [];
-          for (let alpha = 0; alpha <= 360; alpha += gridStep) {
-            const a = alpha * (Math.PI / 180);
-            const p = new Vector3(Math.sin(a), Math.cos(a) * Math.cos(phi), Math.cos(a) * Math.sin(phi));
-            pts.push(projectPoint(p, cameraRotation, width, height, viewSettings));
-          }
-          const groups = filterJumps(pts, width * viewSettings.zoom);
-          const isAxis = Math.abs(i - 180) < 0.1;
-          groups.forEach(g => drawPolyline(g, isAxis ? axisColorH : gridColorH, isAxis ? 2 : 1));
-
-          // Labels for Red Arcs
-          // Sample at alpha=0
-          const labelPos = new Vector3(0, Math.cos(phi), Math.sin(phi));
-          const lp = projectPoint(labelPos, cameraRotation, width, height, viewSettings);
-          if (lp.visible) {
-            drawText(`${i - 180}°`, lp.x, lp.y, axisColorH, "center", isAxis ? "bold" : "normal");
-          }
+        // Horizontal Arcs (Latitude) - Red
+        for (const i of angles) if (!isAxis(i)) {
+          const ph = (i - 180) * DEG2RAD;
+          greatCircle([0, Math.cos(ph), Math.sin(ph)], [1, 0, 0], gridDt);
         }
+        strokeOut(gridColorH, 1);
+        for (const i of angles) if (isAxis(i)) greatCircle([0, 1, 0], [1, 0, 0], gridDt);
+        strokeOut(axisColorH, 2);
 
         // Central Arcs - Blue
-        for (let i = 180 % gridAngle; i < 360; i += gridAngle) {
-          const phi = (i - 180) * (Math.PI / 180);
-          const pts: ProjectedPoint[] = [];
-          for (let alpha = 0; alpha <= 360; alpha += gridStep) {
-            const a = alpha * (Math.PI / 180);
-            const p = new Vector3(Math.cos(phi) * Math.cos(a), Math.sin(a), Math.sin(phi) * Math.cos(a));
-            pts.push(projectPoint(p, cameraRotation, width, height, viewSettings));
-          }
-          const groups = filterJumps(pts, width * viewSettings.zoom);
-          groups.forEach(g => drawPolyline(g, gridColorC, 1));
+        for (const i of angles) {
+          const ph = (i - 180) * DEG2RAD;
+          greatCircle([Math.cos(ph), 0, Math.sin(ph)], [0, 1, 0], gridDt);
+        }
+        strokeOut(gridColorC, 1);
+
+        for (const i of angles) {
+          const th = (i - 180) * DEG2RAD;
+          const lv = project(-Math.sin(th), Math.cos(th), 0);
+          if (lv.visible) labels.push({ t: `${i - 180}°`, x: lv.x, y: lv.y, c: axisColorV, b: isAxis(i) });
+          const lh = project(0, Math.cos(th), Math.sin(th));
+          if (lh.visible) labels.push({ t: `${i - 180}°`, x: lh.x, y: lh.y, c: axisColorH, b: isAxis(i) });
         }
       }
 
       // --- Geometry Rendering ---
-      geometries.forEach(geo => {
-        if (!geo.visible || geo.type !== 'cube') return;
+      const infDt = Math.PI / infiniteSteps;
+      for (const geo of geometries) {
+        if (!geo.visible || geo.type !== 'cube') continue;
         const c = geo as CubeGeometry;
         const q = new Quaternion().setFromEuler(c.rotation);
         const h = c.size.clone().multiplyScalar(0.5);
 
-        const cornersLocal = [
+        const cornersWorld = [
           new Vector3(-h.x, -h.y, -h.z), new Vector3(h.x, -h.y, -h.z),
           new Vector3(h.x, -h.y, h.z), new Vector3(-h.x, -h.y, h.z),
           new Vector3(-h.x, h.y, -h.z), new Vector3(h.x, h.y, -h.z),
           new Vector3(h.x, h.y, h.z), new Vector3(-h.x, h.y, h.z)
-        ];
-        const cornersWorld = cornersLocal.map(v => v.applyQuaternion(q).add(c.center));
-        const edges = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
+        ].map(v => v.applyQuaternion(q).add(c.center));
 
-        // Infinite perspective lines (Spiderweb)
         if (c.showEdgeGuides) {
-          const axisX = new Vector3(1, 0, 0).applyQuaternion(q).normalize();
-          const axisY = new Vector3(0, 1, 0).applyQuaternion(q).normalize();
-          const axisZ = new Vector3(0, 0, 1).applyQuaternion(q).normalize();
-
-          // Trace infinite lines for all edges of the cube
-          // For X-direction edges
-          [0, 3, 4, 7].forEach(idx => {
-            const linePts = getProjectedInfiniteLine(cornersWorld[idx], axisX, cameraRotation, width, height, infiniteSteps, viewSettings, c.showFullGuide);
-            filterJumps(linePts, width * viewSettings.zoom).forEach(g => drawPolyline(g, c.color, 0.4, [3, 6]));
-          });
-          // For Y-direction edges
-          [0, 1, 2, 3].forEach(idx => {
-            const linePts = getProjectedInfiniteLine(cornersWorld[idx], axisY, cameraRotation, width, height, infiniteSteps, viewSettings, c.showFullGuide);
-            filterJumps(linePts, width * viewSettings.zoom).forEach(g => drawPolyline(g, c.color, 0.4, [3, 6]));
-          });
-          // For Z-direction edges
-          [0, 1, 4, 5].forEach(idx => {
-            const linePts = getProjectedInfiniteLine(cornersWorld[idx], axisZ, cameraRotation, width, height, infiniteSteps, viewSettings, c.showFullGuide);
-            filterJumps(linePts, width * viewSettings.zoom).forEach(g => drawPolyline(g, c.color, 0.4, [3, 6]));
-          });
+          // Line O + D*t through the projection == great circle O cos(a) + D*200 sin(a);
+          // a in [-pi/2, pi/2] is the half from VP(-D) to VP(D), [-pi/2, 3pi/2] the full circle.
+          const t1 = c.showFullGuide ? 1.5 * Math.PI : 0.5 * Math.PI;
+          const guide = (idxs: number[], axis: Vector3) => {
+            const d = axis.applyQuaternion(q).normalize().multiplyScalar(200);
+            for (const idx of idxs) {
+              const o = cornersWorld[idx];
+              greatCircle([o.x, o.y, o.z], [d.x, d.y, d.z], infDt, -0.5 * Math.PI, t1, c.showFullGuide ? 32 : 16);
+            }
+          };
+          guide([0, 3, 4, 7], new Vector3(1, 0, 0));
+          guide([0, 1, 2, 3], new Vector3(0, 1, 0));
+          guide([0, 1, 4, 5], new Vector3(0, 0, 1));
+          strokeOut(c.color, 0.4, [3, 6]);
         }
 
-        // Cube Edges
-        edges.forEach(([s, e]) => {
-          const pts = sampleProjectedLine(cornersWorld[s], cornersWorld[e], cameraRotation, width, height, edgeSteps, viewSettings);
-          filterJumps(pts, width * viewSettings.zoom).forEach(g => drawPolyline(g, c.color, 2));
-        });
-      });
+        for (const [s, en] of CUBE_EDGES) segment(cornersWorld[s], cornersWorld[en], edgeSteps);
+        strokeOut(c.color, 2);
+      }
+
+      for (const l of labels) {
+        ctx.font = l.b ? fontBold : fontNormal;
+        ctx.fillStyle = l.c;
+        ctx.fillText(l.t, l.x, l.y);
+      }
 
       ctx.restore();
 
       // --- Static Outer Rim Degree Indicators ---
       if (showGrid) {
+        ctx.font = fontBold;
+        ctx.fillStyle = labelColor;
         for (let i = 90 % gridAngle; i < 360; i += gridAngle) {
-          const angleRad = (i - 90) * (Math.PI / 180);
+          const angleRad = (i - 90) * DEG2RAD;
           const tr = scale + 20;
-          const lx = centerX + tr * Math.cos(angleRad);
-          const ly = centerY + tr * Math.sin(angleRad);
-          drawText(`${i}°`, lx, ly, labelColor, "center", "bold");
+          ctx.fillText(`${i}°`, centerX + tr * Math.cos(angleRad), centerY + tr * Math.sin(angleRad));
         }
       }
 
@@ -319,24 +340,25 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
         ctx.fillRect(selectionStart.x, selectionStart.y, selectionEnd.x - selectionStart.x, selectionEnd.y - selectionStart.y);
         ctx.setLineDash([]);
       }
-
-      if (!isExporting) {
-        animationFrameId = requestAnimationFrame(() => render(false));
-      }
+      ctx.restore();
     };
+    renderRef.current = render;
 
+    // Draw once per change, synchronized to the next frame
+    const id = requestAnimationFrame(() => render(false));
+    return () => cancelAnimationFrame(id);
+  }, [state, isSelecting, selectionStart, selectionEnd, wasm, size]);
+
+  useEffect(() => {
     (window as any).renderForExport = () => {
       const canvas = canvasRef.current;
       if (!canvas) return null;
-      render(true);
+      renderRef.current(true);
       const data = canvas.toDataURL("image/png");
-      render(false);
+      renderRef.current(false);
       return data;
     };
-
-    render(false);
-    return () => cancelAnimationFrame(animationFrameId);
-  }, [state, isSelecting, selectionStart, selectionEnd, isRotating]);
+  }, []);
 
   return (
     <div ref={containerRef} className={`absolute left-96 inset-0 z-0 overflow-hidden ${state.isDarkMode ? 'bg-slate-900' : 'bg-slate-50'}`}>
@@ -346,7 +368,7 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
-        className={`block w-full h-full transition-all ${state.selectionMode ? 'cursor-crosshair' :
+        className={`block w-full h-full ${state.selectionMode ? 'cursor-crosshair' :
           isRotating ? 'cursor-grabbing' : 'cursor-grab'
           }`}
       />
@@ -354,24 +376,4 @@ export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
   );
 };
 
-function filterJumps(points: ProjectedPoint[], threshold: number): ProjectedPoint[][] {
-  const groups: ProjectedPoint[][] = [];
-  let currentGroup: ProjectedPoint[] = [];
-  for (let i = 0; i < points.length; i++) {
-    const p = points[i];
-    if (!p.visible) {
-      if (currentGroup.length > 0) { groups.push(currentGroup); currentGroup = []; }
-      continue;
-    }
-    if (currentGroup.length > 0) {
-      const prev = currentGroup[currentGroup.length - 1];
-      // If the distance between consecutive points is too large, it's likely a wrap-around singularity jump
-      if (Math.hypot(p.x - prev.x, p.y - prev.y) > threshold / 3) {
-        groups.push(currentGroup); currentGroup = [];
-      }
-    }
-    currentGroup.push(p);
-  }
-  if (currentGroup.length > 0) groups.push(currentGroup);
-  return groups;
-}
+const CUBE_EDGES = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
