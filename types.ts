@@ -1,51 +1,32 @@
-import { Vector3, Euler } from 'three';
+import type { Dispatch, SetStateAction } from 'react';
 
-export interface ViewSettings {
-  zoom: number;
-  offsetX: number;
-  offsetY: number;
+export type Vec3 = [number, number, number];
+
+export interface Geometry {
+  id: string;
+  name: string;
+  kind: 'cube' | 'mesh';
+  color: string;
+  visible: boolean;
+  collapsed: boolean;
+  center: Vec3;
+  size: Vec3;
+  rotation: Vec3; // degrees
+  guides: boolean; // cube: infinite edge guides
+  fullGuide: boolean; // cube: full great circles
+  wireframe: boolean; // mesh: draw triangle edges
+  mesh?: Float32Array; // mesh: triangle soup (9 floats / tri), normalized to a unit box
 }
 
 export interface AppState {
-  cameraRotation: Euler;
+  camera: Vec3; // degrees
   showGrid: boolean;
   gridAngle: number;
-  snapToGrid: boolean;
-  renderDetail: number;
-  geometries: GeometryItem[];
-  viewSettings: ViewSettings;
+  detail: number;
+  geometries: Geometry[];
+  view: { zoom: number; offsetX: number; offsetY: number };
   selectionMode: boolean;
-  isDarkMode: boolean; // Added for theme support
+  dark: boolean;
 }
 
-export type GeometryType = 'cube';
-
-export interface BaseGeometry {
-  id: string;
-  name: string;
-  collapsed: boolean;
-  type: GeometryType;
-  color: string;
-  visible: boolean;
-}
-
-export interface CubeGeometry extends BaseGeometry {
-  type: 'cube';
-  center: Vector3;
-  size: Vector3;
-  rotation: Euler;
-  showEdgeGuides: boolean;
-  showCenterGuides: boolean;
-  showFullGuide?: boolean;
-}
-
-export type GeometryItem = CubeGeometry;
-
-export interface ProjectedPoint {
-  x: number;
-  y: number;
-  u: number; // Raw projection U
-  v: number; // Raw projection V
-  zScale: number;
-  visible: boolean;
-}
+export type SetState = Dispatch<SetStateAction<AppState>>;

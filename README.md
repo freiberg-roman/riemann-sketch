@@ -16,9 +16,11 @@ The tool runs directly in your browser.
 
 ## Features
 
-*   **Interactive Camera**: Rotate and zoom to explore the spherical field of view (up to 180°).
+*   **Interactive Camera**: Rotate, pan and zoom to explore the spherical field of view (up to 180°).
 *   **Dynamic Grids**: Toggle and adjust perspective lines to help construct your drawing.
-*   **Cube Study**: Place and rotate 3D cubes to understand form and distortion.
+*   **Cube Study**: Place and rotate 3D cubes (with infinite edge guides) to understand form and distortion.
+*   **STL Import**: Load any `.stl` model (ASCII or binary) and see it shaded in curvilinear perspective.
+*   **Mobile Friendly**: Drag to rotate, pinch or scroll to zoom; the settings panel folds into a bottom sheet on small screens.
 *   **Export**: Save your views to verify your work or use as an underlay for digital painting.
 
 ---

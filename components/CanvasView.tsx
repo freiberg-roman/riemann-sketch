@@ -1,379 +1,300 @@
-import React, { useRef, useEffect, useState } from 'react';
-import { AppState, CubeGeometry, ProjectedPoint } from '../types';
-import { Vector3, Quaternion, Matrix4 } from 'three';
-import { projectPoint } from '../utils/math';
-import { VIEWPORT_PADDING, DEG2RAD } from '../constants';
+import React, { useEffect, useRef, useState } from 'react';
+import { Euler, Matrix4, Quaternion, Vector3 } from 'three';
+import { AppState, Geometry, SetState } from '../types';
+import { DEG, wrapDeg } from '../utils/scene';
 import { WasmCore, wasmReady, getWasm, readOut } from '../utils/wasmCore';
 
-interface CanvasViewProps {
-  state: AppState;
-  setState: React.Dispatch<React.SetStateAction<AppState>>;
-}
+const PAD = 30;
+const TAU = Math.PI * 2;
+const hexRgb = (h: string) => [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16));
 
-export const CanvasView: React.FC<CanvasViewProps> = ({ state, setState }) => {
+/** Rotation * scale matrix (row-major 3x3) for a geometry's local -> world transform. */
+const modelMatrix = (g: Geometry) => {
+  const e = new Matrix4().makeRotationFromEuler(new Euler(...g.rotation.map(a => a * DEG) as [number, number, number])).elements;
+  return [0, 1, 2].flatMap(r => [0, 1, 2].map(c => e[c * 4 + r] * g.size[c]));
+};
+
+interface Props { state: AppState; setState: SetState; exportRef: React.MutableRefObject<() => string | null> }
+
+export const CanvasView: React.FC<Props> = ({ state, setState, exportRef }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  // Selection State
-  const [isSelecting, setIsSelecting] = useState(false);
-  const [selectionStart, setSelectionStart] = useState({ x: 0, y: 0 });
-  const [selectionEnd, setSelectionEnd] = useState({ x: 0, y: 0 });
-
-  // Navigation State
-  const [isRotating, setIsRotating] = useState(false);
-  const lastMousePos = useRef({ x: 0, y: 0 });
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    if (state.selectionMode) {
-      setIsSelecting(true);
-      setSelectionStart({ x, y });
-      setSelectionEnd({ x, y });
-    } else {
-      setIsRotating(true);
-      lastMousePos.current = { x: e.clientX, y: e.clientY };
-    }
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    const rect = canvasRef.current?.getBoundingClientRect();
-    if (!rect) return;
-
-    if (isSelecting) {
-      setSelectionEnd({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-    } else if (isRotating) {
-      const dx = e.clientX - lastMousePos.current.x;
-      const dy = e.clientY - lastMousePos.current.y;
-      lastMousePos.current = { x: e.clientX, y: e.clientY };
-
-      const pr = pendingRot.current;
-      pr.dx += dx; pr.dy += dy;
-      if (!pr.raf) pr.raf = requestAnimationFrame(flushRotation);
-    }
-  };
-
-  const handleMouseUp = () => {
-    if (isSelecting) {
-      setIsSelecting(false);
-      const x1 = Math.min(selectionStart.x, selectionEnd.x);
-      const y1 = Math.min(selectionStart.y, selectionEnd.y);
-      const w = Math.abs(selectionStart.x - selectionEnd.x);
-      const h = Math.abs(selectionStart.y - selectionEnd.y);
-
-      if (w < 10 || h < 10) return;
-
-      const canvas = canvasRef.current;
-      if (!canvas) return;
-
-      const centerX = canvas.clientWidth / 2;
-      const centerY = canvas.clientHeight / 2;
-      const selCenterX = x1 + w / 2;
-      const selCenterY = y1 + h / 2;
-      const zoomMultiplier = Math.min(canvas.clientWidth / w, canvas.clientHeight / h);
-
-      setState(prev => {
-        const newZoom = prev.viewSettings.zoom * zoomMultiplier;
-        const curRelX = selCenterX - centerX - prev.viewSettings.offsetX;
-        const curRelY = selCenterY - centerY - prev.viewSettings.offsetY;
-        const newOffsetX = -curRelX * zoomMultiplier;
-        const newOffsetY = -curRelY * zoomMultiplier;
-
-        return {
-          ...prev,
-          selectionMode: false,
-          viewSettings: {
-            zoom: newZoom,
-            offsetX: newOffsetX,
-            offsetY: newOffsetY
-          }
-        };
-      });
-    }
-    setIsRotating(false);
-  };
-
-  const handleMouseLeave = () => {
-    setIsRotating(false);
-    setIsSelecting(false);
-  };
-
-  // Coalesce rotation drags to at most one state update per frame
-  const pendingRot = useRef({ dx: 0, dy: 0, raf: 0 });
-  const flushRotation = () => {
-    const pr = pendingRot.current;
-    pr.raf = 0;
-    const { dx, dy } = pr;
-    pr.dx = 0; pr.dy = 0;
-    if (dx === 0 && dy === 0) return;
-    const sensitivity = 0.005;
-    setState(prev => {
-      const newRot = prev.cameraRotation.clone();
-      newRot.z -= dx * sensitivity;
-      newRot.x -= dy * sensitivity;
-      return { ...prev, cameraRotation: newRot };
-    });
-  };
-
   const [wasm, setWasm] = useState<WasmCore | null>(getWasm());
+  const [size, setSize] = useState({ w: 0, h: 0, dpr: 1 });
+  const [sel, setSel] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const renderRef = useRef<(transparent: boolean) => void>(() => { });
+
   useEffect(() => { if (!wasm) wasmReady.then(setWasm); }, []);
 
-  // Track container size (CSS px) without polling every frame
-  const [size, setSize] = useState({ w: 0, h: 0, dpr: 1 });
   useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    const update = () => setSize({ w: container.clientWidth, h: container.clientHeight, dpr: Math.min(2, window.devicePixelRatio || 1) });
+    const c = canvasRef.current!;
+    const update = () => setSize({ w: c.clientWidth, h: c.clientHeight, dpr: Math.min(2, devicePixelRatio || 1) });
     update();
     const ro = new ResizeObserver(update);
-    ro.observe(container);
-    window.addEventListener('resize', update);
-    return () => { ro.disconnect(); window.removeEventListener('resize', update); };
+    ro.observe(c);
+    // Wheel zoom must be non-passive to prevent page scroll
+    const onWheel = (e: WheelEvent) => { e.preventDefault(); zoomAt(e.offsetX, e.offsetY, Math.exp(-e.deltaY * 0.0015)); };
+    c.addEventListener('wheel', onWheel, { passive: false });
+    return () => { ro.disconnect(); c.removeEventListener('wheel', onWheel); };
   }, []);
 
-  const renderRef = useRef<(isExporting: boolean) => void>(() => { });
+  // Zoom by factor f keeping screen point (px, py) fixed
+  const zoomAt = (px: number, py: number, f: number, dx = 0, dy = 0) => setState(p => {
+    const c = canvasRef.current!, w2 = c.clientWidth / 2, h2 = c.clientHeight / 2;
+    const zoom = Math.min(500, Math.max(0.3, p.view.zoom * f));
+    f = zoom / p.view.zoom;
+    return {
+      ...p, view: {
+        zoom,
+        offsetX: px + (w2 + p.view.offsetX - px) * f - w2 + dx,
+        offsetY: py + (h2 + p.view.offsetY - py) * f - h2 + dy,
+      }
+    };
+  });
+
+  const local = (e: React.PointerEvent) => {
+    const r = canvasRef.current!.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    canvasRef.current!.setPointerCapture(e.pointerId);
+    const p = local(e);
+    pointers.current.set(e.pointerId, p);
+    if (state.selectionMode && pointers.current.size === 1) setSel({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    const ps = pointers.current, prev = ps.get(e.pointerId);
+    if (!prev) return;
+    const p = local(e);
+    if (ps.size === 2) {
+      const [a, b] = [...ps.values()];
+      const other = a === prev ? b : a;
+      const d0 = Math.hypot(prev.x - other.x, prev.y - other.y), d1 = Math.hypot(p.x - other.x, p.y - other.y);
+      zoomAt((p.x + other.x) / 2, (p.y + other.y) / 2, d0 > 0 ? d1 / d0 : 1, (p.x - prev.x) / 2, (p.y - prev.y) / 2);
+    } else if (sel) {
+      setSel(s => s && { ...s, x1: p.x, y1: p.y });
+    } else if (ps.size === 1) {
+      const k = 0.005 / DEG / Math.sqrt(state.view.zoom);
+      setState(s => ({ ...s, camera: [wrapDeg(s.camera[0] - (p.y - prev.y) * k), s.camera[1], wrapDeg(s.camera[2] - (p.x - prev.x) * k)] }));
+    }
+    ps.set(e.pointerId, p);
+  };
+
+  const onPointerUp = (e: React.PointerEvent) => {
+    pointers.current.delete(e.pointerId);
+    if (!sel) return;
+    setSel(null);
+    const w = Math.abs(sel.x1 - sel.x0), h = Math.abs(sel.y1 - sel.y0);
+    if (w < 10 || h < 10) return;
+    const c = canvasRef.current!, f = Math.min(c.clientWidth / w, c.clientHeight / h);
+    setState(p => ({
+      ...p, selectionMode: false, view: {
+        zoom: p.view.zoom * f,
+        offsetX: -((sel.x0 + sel.x1) / 2 - c.clientWidth / 2 - p.view.offsetX) * f,
+        offsetY: -((sel.y0 + sel.y1) / 2 - c.clientHeight / 2 - p.view.offsetY) * f,
+      }
+    }));
+  };
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-
-    const render = (isExporting = false) => {
+    const canvas = canvasRef.current!;
+    const render = (transparent: boolean) => {
       const ctx = canvas.getContext('2d');
-      if (!ctx || !wasm || size.w === 0 || size.h === 0) return;
-
-      const width = size.w, height = size.h, dpr = size.dpr;
+      const { w: width, h: height, dpr } = size;
+      if (!ctx || !wasm || !width || !height) return;
       const pw = Math.round(width * dpr), ph = Math.round(height * dpr);
       if (canvas.width !== pw || canvas.height !== ph) { canvas.width = pw; canvas.height = ph; }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-      const { cameraRotation, showGrid, gridAngle, geometries, renderDetail, viewSettings, isDarkMode } = state;
+      const { camera, showGrid, gridAngle, geometries, detail, view, dark } = state;
+      const adaptive = Math.min(10, Math.sqrt(view.zoom));
+      const edgeSteps = Math.max(1, Math.round(10 * detail * adaptive));
+      const gridDt = Math.max(1e-7, (4 / (detail * adaptive)) * DEG);
+      const infDt = Math.PI / Math.max(1, Math.round(50 * detail * adaptive));
 
-      const adaptiveFactor = Math.min(10, Math.sqrt(viewSettings.zoom));
-      const gridStep = 4 / (renderDetail * adaptiveFactor);
-      const edgeSteps = Math.max(1, Math.round(10 * renderDetail * adaptiveFactor));
-      const infiniteSteps = Math.max(1, Math.round(50 * renderDetail * adaptiveFactor));
+      ctx.clearRect(0, 0, width, height);
+      if (!transparent) { ctx.fillStyle = dark ? '#0f172a' : '#f8fafc'; ctx.fillRect(0, 0, width, height); }
 
-      if (isExporting) {
-        ctx.clearRect(0, 0, width, height);
-      } else {
-        ctx.fillStyle = isDarkMode ? '#0f172a' : '#f8fafc';
-        ctx.fillRect(0, 0, width, height);
-      }
+      const s = (Math.min(width, height) / 2 - PAD) * view.zoom;
+      const cx = width / 2 + view.offsetX, cy = height / 2 + view.offsetY;
+      // World -> camera = R^T; rows of R^T are the columns of R (column-major elements)
+      const e = new Matrix4().makeRotationFromEuler(new Euler(camera[0] * DEG, camera[1] * DEG, camera[2] * DEG)).elements;
+      const jump = (width * view.zoom) / 3;
+      wasm.set_view(e[0], e[1], e[2], e[4], e[5], e[6], e[8], e[9], e[10], s, cx, cy, jump, 0.25 / dpr,
+        Math.max(0, cx - s) - 4, Math.max(0, cy - s) - 4, Math.min(width, cx + s) + 4, Math.min(height, cy + s) + 4);
 
-      const scale = (Math.min(width, height) / 2 - VIEWPORT_PADDING) * viewSettings.zoom;
-      const centerX = width / 2 + viewSettings.offsetX;
-      const centerY = height / 2 + viewSettings.offsetY;
-
-      // Inverse camera rotation as a 3x3 row-major matrix
-      const e = new Matrix4().makeRotationFromEuler(cameraRotation).elements; // column-major R
-      // R^T rows = R columns
-      const margin = 4;
-      wasm.set_view(
-        e[0], e[1], e[2], e[4], e[5], e[6], e[8], e[9], e[10],
-        scale, centerX, centerY, (width * viewSettings.zoom) / 3, 0.25 / dpr,
-        Math.max(0, centerX - scale) - margin, Math.max(0, centerY - scale) - margin,
-        Math.min(width, centerX + scale) + margin, Math.min(height, centerY + scale) + margin
-      );
-      const project = (x: number, y: number, z: number) =>
-        projectPoint(new Vector3(x, y, z), cameraRotation, width, height, viewSettings);
-
-      const TWO_PI = Math.PI * 2;
-      const greatCircle = (a: number[], b: number[], minDt: number, t0 = 0, t1 = TWO_PI, base = 64) =>
-        wasm.curve(0, a[0], a[1], a[2], b[0], b[1], b[2], t0, t1, base, minDt);
-      const segment = (s: Vector3, en: Vector3, steps: number) =>
-        wasm.curve(1, s.x, s.y, s.z, en.x - s.x, en.y - s.y, en.z - s.z, 0, 1, Math.min(16, steps), 1 / steps);
-
-      // Stroke everything currently in the wasm buffer as a single path
-      const strokeOut = (color: string, lw: number, dash: number[] = []) => {
+      // Stereographic projection (camera looks along +Y, Z up); null if at the antipode
+      const project = (x: number, y: number, z: number): [number, number] | null => {
+        const X = e[0] * x + e[1] * y + e[2] * z, Y = e[4] * x + e[5] * y + e[6] * z, Z = e[8] * x + e[9] * y + e[10] * z;
+        const r = Math.hypot(X, Y, Z);
+        if (r < 1e-5) return [cx, cy];
+        if (Y / r < -0.999) return null;
+        return [cx + (X / (r + Y)) * s, cy - (Z / (r + Y)) * s];
+      };
+      const circle = (a: number[], b: number[], dt: number, t0 = 0, t1 = TAU, base = 64) =>
+        wasm.curve(0, a[0], a[1], a[2], b[0], b[1], b[2], t0, t1, base, dt);
+      const stroke = (color: string, lw: number, dash: number[] = []) => {
         const buf = readOut(wasm);
-        if (buf.length < 4) { wasm.reset(); return; }
         ctx.beginPath();
         let pen = false;
         for (let i = 0; i < buf.length; i += 2) {
-          const x = buf[i];
-          if (x !== x) { pen = false; continue; }
-          if (pen) ctx.lineTo(x, buf[i + 1]); else { ctx.moveTo(x, buf[i + 1]); pen = true; }
+          if (buf[i] !== buf[i]) { pen = false; continue; }
+          pen ? ctx.lineTo(buf[i], buf[i + 1]) : ctx.moveTo(buf[i], buf[i + 1]);
+          pen = true;
         }
-        ctx.strokeStyle = color;
-        ctx.lineWidth = lw;
-        ctx.setLineDash(dash);
+        ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.setLineDash(dash);
         ctx.stroke();
-        if (dash.length) ctx.setLineDash([]);
+        ctx.setLineDash([]);
         wasm.reset();
       };
 
-      const gridColorV = isDarkMode ? 'rgba(16, 185, 129, 0.2)' : 'rgba(5, 150, 105, 0.4)';
-      const gridColorH = isDarkMode ? 'rgba(239, 68, 68, 0.2)' : 'rgba(220, 38, 38, 0.4)';
-      const gridColorC = isDarkMode ? 'rgba(59, 130, 246, 0.2)' : 'rgba(37, 99, 235, 0.4)';
-      const axisColorV = isDarkMode ? '#10b981' : '#059669';
-      const axisColorH = isDarkMode ? '#ef4444' : '#dc2626';
-      const labelColor = isDarkMode ? '#3b82f6' : '#2563eb';
-      const boundaryColor = isDarkMode ? '#334155' : '#cbd5e1';
-
-      ctx.save();
+      const col = dark
+        ? { v: '#10b981', h: '#ef4444', c: '#3b82f6', a: 0.2, rim: '#334155' }
+        : { v: '#059669', h: '#dc2626', c: '#2563eb', a: 0.4, rim: '#cbd5e1' };
+      const fontSize = Math.max(8, 10 * Math.sqrt(view.zoom));
       ctx.lineJoin = 'round';
+      ctx.textAlign = 'center';
 
-      // Outer Boundary
       ctx.beginPath();
-      ctx.arc(centerX, centerY, scale, 0, Math.PI * 2);
-      ctx.strokeStyle = boundaryColor;
-      ctx.lineWidth = 2;
+      ctx.arc(cx, cy, s, 0, TAU);
+      ctx.strokeStyle = col.rim; ctx.lineWidth = 2;
       ctx.stroke();
-
       ctx.save();
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, scale, 0, Math.PI * 2);
       ctx.clip();
 
-      const fontSize = Math.max(8, 10 * Math.sqrt(viewSettings.zoom));
-      const fontNormal = `normal ${fontSize}px monospace`;
-      const fontBold = `bold ${fontSize}px monospace`;
-      ctx.textAlign = 'center';
-      const labels: { t: string; x: number; y: number; c: string; b: boolean }[] = [];
-
-      // --- Grid Rendering (batched per color) ---
+      // --- Grid: longitude (green), latitude (red), central (blue) great circles ---
+      const labels: [string, number, number, string, boolean][] = [];
       if (showGrid) {
-        const gridDt = Math.max(1e-7, gridStep * DEG2RAD);
         const angles: number[] = [];
-        for (let i = 180 % gridAngle; i < 360; i += gridAngle) angles.push(i);
-        const isAxis = (i: number) => Math.abs(i - 180) < 0.1;
-
-        // Vertical Arcs (Longitude) - Green
-        for (const i of angles) if (!isAxis(i)) {
-          const th = (i - 180) * DEG2RAD;
-          greatCircle([-Math.sin(th), Math.cos(th), 0], [0, 0, 1], gridDt);
-        }
-        strokeOut(gridColorV, 1);
-        for (const i of angles) if (isAxis(i)) greatCircle([0, 1, 0], [0, 0, 1], gridDt);
-        strokeOut(axisColorV, 2);
-
-        // Horizontal Arcs (Latitude) - Red
-        for (const i of angles) if (!isAxis(i)) {
-          const ph = (i - 180) * DEG2RAD;
-          greatCircle([0, Math.cos(ph), Math.sin(ph)], [1, 0, 0], gridDt);
-        }
-        strokeOut(gridColorH, 1);
-        for (const i of angles) if (isAxis(i)) greatCircle([0, 1, 0], [1, 0, 0], gridDt);
-        strokeOut(axisColorH, 2);
-
-        // Central Arcs - Blue
-        for (const i of angles) {
-          const ph = (i - 180) * DEG2RAD;
-          greatCircle([Math.cos(ph), 0, Math.sin(ph)], [0, 1, 0], gridDt);
-        }
-        strokeOut(gridColorC, 1);
-
-        for (const i of angles) {
-          const th = (i - 180) * DEG2RAD;
-          const lv = project(-Math.sin(th), Math.cos(th), 0);
-          if (lv.visible) labels.push({ t: `${i - 180}°`, x: lv.x, y: lv.y, c: axisColorV, b: isAxis(i) });
-          const lh = project(0, Math.cos(th), Math.sin(th));
-          if (lh.visible) labels.push({ t: `${i - 180}°`, x: lh.x, y: lh.y, c: axisColorH, b: isAxis(i) });
+        for (let i = 180 % gridAngle; i < 360; i += gridAngle) angles.push((i - 180) * DEG);
+        const families: [string, (t: number) => number[], number[], boolean][] = [
+          [col.v, t => [-Math.sin(t), Math.cos(t), 0], [0, 0, 1], true],
+          [col.h, t => [0, Math.cos(t), Math.sin(t)], [1, 0, 0], true],
+          [col.c, t => [Math.cos(t), 0, Math.sin(t)], [0, 1, 0], false],
+        ];
+        ctx.globalAlpha = col.a;
+        for (const [c, a, b] of families) { for (const t of angles) circle(a(t), b, gridDt); stroke(c, 1); }
+        ctx.globalAlpha = 1;
+        for (const [c, a, b, axis] of families) if (axis) {
+          circle(a(0), b, gridDt); stroke(c, 2);
+          for (const t of angles) {
+            const p = project(...(a(t) as [number, number, number]));
+            if (p) labels.push([`${Math.round(t / DEG)}°`, p[0], p[1], c, Math.abs(t) < 1e-6]);
+          }
         }
       }
 
-      // --- Geometry Rendering ---
-      const infDt = Math.PI / infiniteSteps;
-      for (const geo of geometries) {
-        if (!geo.visible || geo.type !== 'cube') continue;
-        const c = geo as CubeGeometry;
-        const q = new Quaternion().setFromEuler(c.rotation);
-        const h = c.size.clone().multiplyScalar(0.5);
+      // --- Geometry ---
+      for (const g of geometries) {
+        if (!g.visible) continue;
+        const m = modelMatrix(g), [ox, oy, oz] = g.center;
+        const world = (x: number, y: number, z: number) => [
+          m[0] * x + m[1] * y + m[2] * z + ox, m[3] * x + m[4] * y + m[5] * z + oy, m[6] * x + m[7] * y + m[8] * z + oz];
 
-        const cornersWorld = [
-          new Vector3(-h.x, -h.y, -h.z), new Vector3(h.x, -h.y, -h.z),
-          new Vector3(h.x, -h.y, h.z), new Vector3(-h.x, -h.y, h.z),
-          new Vector3(-h.x, h.y, -h.z), new Vector3(h.x, h.y, -h.z),
-          new Vector3(h.x, h.y, h.z), new Vector3(-h.x, h.y, h.z)
-        ].map(v => v.applyQuaternion(q).add(c.center));
-
-        if (c.showEdgeGuides) {
-          // Line O + D*t through the projection == great circle O cos(a) + D*200 sin(a);
-          // a in [-pi/2, pi/2] is the half from VP(-D) to VP(D), [-pi/2, 3pi/2] the full circle.
-          const t1 = c.showFullGuide ? 1.5 * Math.PI : 0.5 * Math.PI;
-          const guide = (idxs: number[], axis: Vector3) => {
-            const d = axis.applyQuaternion(q).normalize().multiplyScalar(200);
-            for (const idx of idxs) {
-              const o = cornersWorld[idx];
-              greatCircle([o.x, o.y, o.z], [d.x, d.y, d.z], infDt, -0.5 * Math.PI, t1, c.showFullGuide ? 32 : 16);
+        if (g.kind === 'mesh' && g.mesh) {
+          // Painter's algorithm: back-face cull, headlight shading, far-to-near fill
+          const src = g.mesh, n = src.length / 9;
+          const pts = new Float32Array(n * 6), depth = new Float32Array(n), shade = new Float32Array(n), order: number[] = [];
+          tri: for (let t = 0; t < n; t++) {
+            const [a, b, c] = [0, 3, 6].map(k => world(src[t * 9 + k], src[t * 9 + k + 1], src[t * 9 + k + 2]));
+            const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            const nx = u[1] * v[2] - u[2] * v[1], ny = u[2] * v[0] - u[0] * v[2], nz = u[0] * v[1] - u[1] * v[0];
+            const mx = (a[0] + b[0] + c[0]) / 3, my = (a[1] + b[1] + c[1]) / 3, mz = (a[2] + b[2] + c[2]) / 3;
+            const dot = nx * mx + ny * my + nz * mz;
+            if (dot >= 0) continue;
+            for (let k = 0; k < 3; k++) {
+              const p = project(...([a, b, c][k] as [number, number, number]));
+              if (!p) continue tri;
+              pts[t * 6 + k * 2] = p[0]; pts[t * 6 + k * 2 + 1] = p[1];
             }
-          };
-          guide([0, 3, 4, 7], new Vector3(1, 0, 0));
-          guide([0, 1, 2, 3], new Vector3(0, 1, 0));
-          guide([0, 1, 4, 5], new Vector3(0, 0, 1));
-          strokeOut(c.color, 0.4, [3, 6]);
+            const d = Math.hypot(mx, my, mz);
+            depth[t] = d;
+            shade[t] = -dot / (Math.hypot(nx, ny, nz) * d || 1);
+            order.push(t);
+          }
+          order.sort((a, b) => depth[b] - depth[a]);
+          const rgb = hexRgb(g.color), line = `rgba(0,0,0,${dark ? 0.5 : 0.35})`;
+          ctx.lineWidth = g.wireframe ? 0.6 : 0.5;
+          for (const t of order) {
+            const o = t * 6;
+            if (Math.max(Math.abs(pts[o] - pts[o + 2]), Math.abs(pts[o] - pts[o + 4]), Math.abs(pts[o + 1] - pts[o + 3]), Math.abs(pts[o + 1] - pts[o + 5])) > jump) continue;
+            const k = 0.25 + 0.75 * shade[t];
+            const fill = `rgb(${rgb[0] * k | 0},${rgb[1] * k | 0},${rgb[2] * k | 0})`;
+            ctx.beginPath();
+            ctx.moveTo(pts[o], pts[o + 1]); ctx.lineTo(pts[o + 2], pts[o + 3]); ctx.lineTo(pts[o + 4], pts[o + 5]);
+            ctx.closePath();
+            ctx.fillStyle = fill; ctx.fill();
+            ctx.strokeStyle = g.wireframe ? line : fill; ctx.stroke();
+          }
+          continue;
         }
 
-        for (const [s, en] of CUBE_EDGES) segment(cornersWorld[s], cornersWorld[en], edgeSteps);
-        strokeOut(c.color, 2);
+        // Cube: corner i has local coords ±0.5 by bits (x=1, y=2, z=4)
+        const corners = [...Array(8)].map((_, i) => world(i & 1 ? 0.5 : -0.5, i & 2 ? 0.5 : -0.5, i & 4 ? 0.5 : -0.5));
+        if (g.guides) {
+          // Line O + D t == great circle O cos(a) + D sin(a) (D scaled large); [-pi/2, pi/2] spans VP(-D) -> VP(D)
+          const t1 = g.fullGuide ? 1.5 * Math.PI : 0.5 * Math.PI;
+          for (const bit of [1, 2, 4]) {
+            const ax = bit === 1 ? 0 : bit === 2 ? 1 : 2, len = 200 / g.size[ax];
+            const d = [m[ax] * len, m[3 + ax] * len, m[6 + ax] * len];
+            for (let i = 0; i < 8; i++) if (!(i & bit)) circle(corners[i], d, infDt, -0.5 * Math.PI, t1, g.fullGuide ? 32 : 16);
+          }
+          stroke(g.color, 0.4, [3, 6]);
+        }
+        for (let i = 0; i < 8; i++) for (const bit of [1, 2, 4]) if (!(i & bit)) {
+          const [a, b] = [corners[i], corners[i | bit]];
+          wasm.curve(1, a[0], a[1], a[2], b[0] - a[0], b[1] - a[1], b[2] - a[2], 0, 1, Math.min(16, edgeSteps), 1 / edgeSteps);
+        }
+        stroke(g.color, 2);
       }
 
-      for (const l of labels) {
-        ctx.font = l.b ? fontBold : fontNormal;
-        ctx.fillStyle = l.c;
-        ctx.fillText(l.t, l.x, l.y);
+      for (const [t, x, y, c, bold] of labels) {
+        ctx.font = `${bold ? 'bold' : 'normal'} ${fontSize}px monospace`;
+        ctx.fillStyle = c;
+        ctx.fillText(t, x, y);
       }
-
       ctx.restore();
 
-      // --- Static Outer Rim Degree Indicators ---
+      // --- Outer rim degree indicators ---
       if (showGrid) {
-        ctx.font = fontBold;
-        ctx.fillStyle = labelColor;
+        ctx.font = `bold ${fontSize}px monospace`;
+        ctx.fillStyle = col.c;
         for (let i = 90 % gridAngle; i < 360; i += gridAngle) {
-          const angleRad = (i - 90) * DEG2RAD;
-          const tr = scale + 20;
-          ctx.fillText(`${i}°`, centerX + tr * Math.cos(angleRad), centerY + tr * Math.sin(angleRad));
+          const a = (i - 90) * DEG;
+          ctx.fillText(`${i}°`, cx + (s + 20) * Math.cos(a), cy + (s + 20) * Math.sin(a) + 4);
         }
       }
 
-      // --- Selection UI ---
-      if (isSelecting) {
-        ctx.strokeStyle = '#f472b6';
-        ctx.setLineDash([5, 5]);
-        ctx.lineWidth = 2;
-        ctx.strokeRect(selectionStart.x, selectionStart.y, selectionEnd.x - selectionStart.x, selectionEnd.y - selectionStart.y);
-        ctx.fillStyle = 'rgba(244, 114, 182, 0.1)';
-        ctx.fillRect(selectionStart.x, selectionStart.y, selectionEnd.x - selectionStart.x, selectionEnd.y - selectionStart.y);
+      if (sel) {
+        ctx.strokeStyle = '#f472b6'; ctx.fillStyle = 'rgba(244,114,182,0.1)';
+        ctx.setLineDash([5, 5]); ctx.lineWidth = 2;
+        ctx.strokeRect(sel.x0, sel.y0, sel.x1 - sel.x0, sel.y1 - sel.y0);
+        ctx.fillRect(sel.x0, sel.y0, sel.x1 - sel.x0, sel.y1 - sel.y0);
         ctx.setLineDash([]);
       }
-      ctx.restore();
     };
     renderRef.current = render;
-
-    // Draw once per change, synchronized to the next frame
     const id = requestAnimationFrame(() => render(false));
     return () => cancelAnimationFrame(id);
-  }, [state, isSelecting, selectionStart, selectionEnd, wasm, size]);
+  }, [state, sel, wasm, size]);
 
-  useEffect(() => {
-    (window as any).renderForExport = () => {
-      const canvas = canvasRef.current;
-      if (!canvas) return null;
-      renderRef.current(true);
-      const data = canvas.toDataURL("image/png");
-      renderRef.current(false);
-      return data;
-    };
-  }, []);
+  exportRef.current = () => {
+    renderRef.current(true);
+    const data = canvasRef.current?.toDataURL('image/png') ?? null;
+    renderRef.current(false);
+    return data;
+  };
 
   return (
-    <div ref={containerRef} className={`absolute left-96 inset-0 z-0 overflow-hidden ${state.isDarkMode ? 'bg-slate-900' : 'bg-slate-50'}`}>
-      <canvas
-        ref={canvasRef}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseLeave}
-        className={`block w-full h-full ${state.selectionMode ? 'cursor-crosshair' :
-          isRotating ? 'cursor-grabbing' : 'cursor-grab'
-          }`}
-      />
-    </div>
+    <canvas
+      ref={canvasRef}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      className={`absolute inset-0 w-full h-full touch-none ${state.selectionMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}`}
+    />
   );
 };
-
-const CUBE_EDGES = [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]];
